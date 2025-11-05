@@ -16,11 +16,9 @@ env:
   AWS_REGION: eu-west-2
 
 jobs:
-  check-build-is-deployed-in-preprod:
-    name: "Check expected version is running in Preprod"
+  run-assurance-tests-in-preprod:
+    name: "Run assurance tests in Preprod"
     runs-on: ubuntu-latest
-    outputs:
-      deployed_app_version: ${{ steps.get_deployed_app_version.outputs.deployed_app_version }}
     timeout-minutes: 20
     environment:
       name: preprod
@@ -28,40 +26,76 @@ jobs:
       id-token: write
       contents: read
     steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.checkout_ref }}
       - name: "Configure AWS credentials for env"
         uses: aws-actions/configure-aws-credentials@v5
         with:
           role-session-name: GitHubActionsSession
           role-to-assume: ${{ secrets.IAM_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: "Get deployed app version"
-        id: get_deployed_app_version
+      - name: "Check deployed version matches version under test"
+        id: check_deployed_app_version
         run: |
           APP_VERSION=$(aws lambda get-function-configuration --function-name gh-vita-${{ secrets.AWS_ACCOUNT_ID }}-server-function | jq -r '.Environment.Variables.APP_VERSION')
-          echo "deployed_app_version=$APP_VERSION" | tee -a $GITHUB_OUTPUT
-      - name: "Check deployed version matches version under test"
-        run: |
-          if  [ "${{ steps.get_deployed_app_version.outputs.deployed_app_version }}" != "${{ inputs.checkout_ref }}" ]; then
-            echo "Expected build ${{ inputs.checkout_ref }} is not currently deployed in Preprod (current deployed version: ${{ steps.get_deployed_app_version.outputs.deployed_app_version }})"
+          if  [ "${APP_VERSION}" != "${{ inputs.checkout_ref }}" ]; then
+            echo "Expected build ${{ inputs.checkout_ref }} is not currently deployed in Preprod (current deployed version: ${APP_VERSION})"
             exit 1
           fi
-
-  acceptance-stage-preprod:
-    name: "Acceptance stage preprod ${{ inputs.release_name }} ${{ inputs.checkout_ref }}"
-    needs: [check-build-is-deployed-in-preprod]
-    uses: ./.github/workflows/stage-5-acceptance.yaml
-    with:
-      environment: "preprod"
-      checkout_ref: ${{ inputs.checkout_ref }}
-      cross_browser: true
-    secrets: inherit
-
-  snapshot-stage-preprod:
-    name: "Snapshot stage preprod ${{ inputs.release_name }} ${{ inputs.checkout_ref }}"
-    needs: [acceptance-stage-preprod, check-build-is-deployed-in-preprod]
-    uses: ./.github/workflows/stage-7-snapshot-test.yaml
-    with:
-      checkout_ref: ${{ inputs.checkout_ref }}
-      release_name: ${{ inputs.release_name }}
-    secrets: inherit
-
+      - name: "Run E2E tests ${{inputs.release_name}}"
+        timeout-minutes: 30
+        uses: ./.github/actions/run-e2e-tests
+        with:
+          checkout_ref: ${{ inputs.checkout_ref }}
+          cross_browser: true
+          environment: "preprod"
+        env:
+          TEST_NHS_APP_URL: ${{ secrets.TEST_NHS_APP_URL }}
+          TEST_NHS_LOGIN_PASSWORD: ${{ secrets.TEST_NHS_LOGIN_PASSWORD }}
+          TEST_NHS_LOGIN_OTP: ${{ secrets.TEST_NHS_LOGIN_OTP }}
+          TEST_NBS_APP_USERNAME: ${{ secrets.TEST_NBS_APP_USERNAME }}
+          TEST_NBS_APP_PASSWORD: ${{ secrets.TEST_NBS_APP_PASSWORD }}
+          TEST_APP_URL: ${{ secrets.TEST_APP_URL }}
+          NHS_APP_REDIRECT_LOGIN_URL: ${{ secrets.NHS_APP_REDIRECT_LOGIN_URL }}
+          VITA_TEST_USER_PATTERN: ${{ secrets.VITA_TEST_USER_PATTERN }}
+          DEPLOY_ENVIRONMENT: "preprod"
+      - name: "Run Contract tests ${{inputs.release_name}}"
+        timeout-minutes: 5
+        uses: ./.github/actions/run-contract-tests
+        with:
+          checkout_ref: ${{ inputs.checkout_ref }}
+          cross_browser: true
+          environment: "preprod"
+        env:
+          CONTENT_API_ENDPOINT: ${{ secrets.CONTENT_API_ENDPOINT }}
+          CONTENT_API_KEY: ${{ secrets.CONTENT_API_KEY }}
+          CONTENT_CACHE_IS_CHANGE_APPROVAL_ENABLED: "false"
+          ELIGIBILITY_API_ENDPOINT: ${{ secrets.ELIGIBILITY_API_ENDPOINT }}
+          ELIGIBILITY_API_KEY: ${{ secrets.ELIGIBILITY_API_KEY }}
+          SSM_PREFIX: ${{ secrets.SSM_PREFIX }}
+          NHS_APP_REDIRECT_LOGIN_URL: "dummy"
+          CONTENT_CACHE_PATH: "dummy"
+          NHS_LOGIN_URL: "dummy"
+          NHS_LOGIN_CLIENT_ID: "dummy"
+          NHS_LOGIN_SCOPE: "dummy"
+          NHS_LOGIN_PRIVATE_KEY: "dummy"
+          NBS_URL: "dummy"
+          NBS_BOOKING_PATH: "dummy"
+          MAX_SESSION_AGE_MINUTES: 0
+          IS_APIM_AUTH_ENABLED: ${{ vars.IS_APIM_AUTH_ENABLED }}
+          AUTH_SECRET: "dummy"
+      - name: "Run Snapshot tests ${{inputs.release_name}}"
+        uses: ./.github/actions/run-snapshot-tests
+        with:
+          checkout_ref: ${{ inputs.checkout_ref }}
+          release_name: ${{ inputs.release_name }}
+        env:
+          TEST_NHS_APP_URL: ${{ secrets.TEST_NHS_APP_URL }}
+          TEST_NHS_LOGIN_PASSWORD: ${{ secrets.TEST_NHS_LOGIN_PASSWORD }}
+          TEST_NHS_LOGIN_OTP: ${{ secrets.TEST_NHS_LOGIN_OTP }}
+          TEST_APP_URL: ${{ secrets.TEST_APP_URL }}
+          VITA_TEST_USER_PATTERN: ${{ secrets.VITA_TEST_USER_PATTERN }}
+          AWS_REGION: eu-west-2
+          AWS_S3_ARTEFACTS_BUCKET: vita-${{ secrets.AWS_ACCOUNT_ID }}-artefacts-preprod
